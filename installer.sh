@@ -1,38 +1,34 @@
 #!/bin/bash
 set -e
 
-# Конфигурация
-DISK="/dev/nvme0n1"
+# Конфигурация для виртуальной машины (BIOS + /dev/vda)
+DISK="/dev/vda"
 ROOT_PASS="lk2020"
 USER_NAME="anoplay"
 USER_PASS="lk2020"
 STAGE3_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/20261011T170049Z/stage3-amd64-openrc-20261011T170049Z.tar.xz"
 
-echo "=== 1. Разметка диска ($DISK) ==="
+echo "=== 1. Разметка диска ($DISK) для BIOS ==="
 wipefs -a "$DISK"
-sgdisk -Z "$DISK"
+# Создаем классическую MBR таблицу разделов через sfdisk
+echo "label: dos" | sfdisk "$DISK"
 
-# Разделы: 1: EFI (1 ГБ), 2: ROOT (остальное)
-sgdisk -n 1:1M:+1G -t 1:ef00 -c 1:"EFI" "$DISK"
-sgdisk -n 2:0:0   -t 2:8300 -c 2:"ROOT" "$DISK"
+# Создаем единственный корневой раздел на весь диск с загрузочным флагом (bootable)
+echo ",,L,*" | sfdisk "$DISK"
 
-PART_EFI="${DISK}p1"
-PART_ROOT="${DISK}p2"
+PART_ROOT="${DISK}1"
 
-# Небольшая пауза для инициализации разделов ядром
+# Пауза для инициализации устройства ядром
 sleep 2
 
-echo "=== 2. Форматирование разделов ==="
-mkfs.fat -F32 "$PART_EFI"
+echo "=== 2. Форматирование раздела в ext4 ==="
 mkfs.ext4 -F "$PART_ROOT"
 
-echo "=== 3. Монтирование файловых систем ==="
+echo "=== 3. Монтирование файловой системы ==="
 mkdir -p /mnt/gentoo
 mount "$PART_ROOT" /mnt/gentoo
-mkdir -p /mnt/gentoo/efi
-mount "$PART_EFI" /mnt/gentoo/efi
 
-echo "=== 4. Загрузка Stage3 (OpenRC) по точной ссылке ==="
+echo "=== 4. Загрузка Stage3 (OpenRC) ==="
 cd /mnt/gentoo
 
 echo "Загрузка: $STAGE3_URL"
@@ -51,7 +47,6 @@ mount --bind /run /mnt/gentoo/run
 
 echo "=== 6. Получение UUID и вход в chroot ==="
 ROOT_UUID=$(blkid -s UUID -o value "$PART_ROOT")
-EFI_UUID=$(blkid -s UUID -o value "$PART_EFI")
 
 chroot /mnt/gentoo /bin/bash <<EOF
 set -e
@@ -76,7 +71,6 @@ eselect locale set en_US.UTF-8
 echo "=== 6.4 Генерация /etc/fstab ==="
 cat << FSTAB_OUT > /etc/fstab
 UUID=$ROOT_UUID / ext4 noatime 0 1
-UUID=$EFI_UUID /efi vfat umask=0077 0 2
 FSTAB_OUT
 
 echo "=== 6.5 Установка бинарного ядра ==="
@@ -86,11 +80,13 @@ echo "=== 6.6 Установка сети и базовых утилит (OpenRC
 emerge --getbinpkg=y net-misc/dhcpcd sys-apps/pciutils
 rc-update add dhcpcd default
 
-echo "=== 6.7 Установка и настройка GRUB (UEFI) ==="
-echo 'GRUB_PLATFORMS="efi-64"' >> /etc/portage/make.conf
+echo "=== 6.7 Установка и настройка GRUB (BIOS/i386-pc) ==="
+# Для BIOS платформ явно указываем поддержку pc
+echo 'GRUB_PLATFORMS="pc"' >> /etc/portage/make.conf
 emerge --getbinpkg=y sys-boot/grub
 
-grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=Gentoo
+# Установка загрузчика в MBR всего диска (не в раздел!)
+grub-install --target=i386-pc "$DISK"
 grub-mkconfig -o /boot/grub/grub.cfg
 
 echo "=== 6.8 Настройка пользователей и паролей ==="
@@ -109,4 +105,4 @@ echo "=== 7. Размонтирование дисков ==="
 umount -l /mnt/gentoo/dev{/shm,/pts,} || true
 umount -R /mnt/gentoo
 
-echo "Готово! Gentoo OpenRC установлена на $DISK. Можно перезагружаться."
+echo "Готово! Gentoo OpenRC (BIOS) установлена на виртуальный диск $DISK. Можно выключать виртуалку и загружаться."
